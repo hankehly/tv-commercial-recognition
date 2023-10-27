@@ -1,10 +1,13 @@
 import argparse
+import re
 import logging
 from pathlib import Path
 from typing import Any
 
 import ffmpeg
 from pydantic import BaseModel
+import datetime
+from subprocess import Popen, PIPE
 
 
 class AudioSegmenter(BaseModel):
@@ -36,52 +39,84 @@ class AudioSegmenter(BaseModel):
         )
 
     def execute(self):
-        out, _ = (
-            ffmpeg.input(self.input_file)
-            .filter(
-                "silencedetect",
-                noise=f"{self.silence_noise}dB",
-                d=self.silence_duration,
-            )
-            .filter("ametadata", mode="print", file="-")
-            .output("-", format="null")
-            .overwrite_output()
-            .run(quiet=True)
-        )
+        # out, _ = (
+        #     ffmpeg.input(self.input_file)
+        #     .filter(
+        #         "silencedetect",
+        #         noise=f"{self.silence_noise}dB",
+        #         d=self.silence_duration,
+        #     )
+        #     .filter("ametadata", mode="print", file="-")
+        #     .output("-", format="null")
+        #     .overwrite_output()
+        #     .run(quiet=True)
+        # )
 
         Path(self.output_path).mkdir(parents=True, exist_ok=self.overwrite)
-        input_file_extension = Path(self.input_file).suffix
+        # input_file_extension = Path(self.input_file).suffix
+        input_file_extension = ".wav"
 
-        start_time = 0
+        start_time = None
         segment_counter = 0
-        for line in out.split(b"\n"):
-            if b"silence_end" in line:
-                silence_end = float(line.split(b"=")[1])
-                segment_duration = silence_end - start_time
-                bound_lower_ok = segment_duration >= self.min_segment_duration
-                bound_upper_ok = segment_duration <= self.max_segment_duration
-                if bound_lower_ok and bound_upper_ok:
-                    output_file = f"{self.output_path}/segment_{segment_counter:05d}{input_file_extension}"
-                    output_stream = ffmpeg.input(
-                        self.input_file, ss=start_time, to=silence_end
-                    )
-                    output_stream.output(
-                        output_file, acodec="copy"
-                    ).overwrite_output().run(quiet=True)
-                    self.log.info(
-                        "Saved segment %d (%.2f seconds) to %s",
-                        segment_counter,
-                        segment_duration,
-                        output_file,
-                    )
-                else:
-                    self.log.warning(
-                        "Segment %d is too short or too long (%.2f seconds), skipping..",
-                        segment_counter,
-                        segment_duration,
-                    )
-                segment_counter += 1
-                start_time = silence_end
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"output_{timestamp}.wav"
+
+        with Popen(
+            [
+                "ffmpeg",
+                "-f",
+                "avfoundation",
+                "-i",
+                ":2",
+                "-af",
+                "silencedetect=noise=-100dB:d=0.8",
+                "-f",
+                "wav",
+                filename,
+            ],
+            stderr=PIPE,
+        ) as p:
+            while True:
+                try:
+                    line = p.stderr.read1().decode("utf-8")
+                    silence_end_match = re.search(r"silence_end: (\d+\.\d+) \| silence_duration: (\d+\.\d+)", line)
+
+                    if silence_end_match:
+                        silence_end = float(silence_end_match.group(1))
+                        silence_dur = float(silence_end_match.group(2))
+                        if start_time is None:
+                            start_time = silence_end
+                            continue
+                        print(f"start_time: {start_time}, silence_end: {silence_end}, silence_dur: {silence_dur}", flush=True)
+                        segment_duration = silence_end - silence_dur - start_time
+                        bound_lower_ok = segment_duration >= self.min_segment_duration
+                        bound_upper_ok = segment_duration <= self.max_segment_duration
+                        if bound_lower_ok and bound_upper_ok:
+                            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                            output_file = f"{self.output_path}/segment_{ts}.wav"
+                            output_stream = ffmpeg.input(
+                                filename, ss=start_time, to=silence_end-silence_dur
+                            )
+                            output_stream.output(
+                                output_file, acodec="copy"
+                            ).overwrite_output().run()
+                            self.log.info(
+                                "Saved segment %d (%.2f seconds) to %s",
+                                segment_counter,
+                                segment_duration,
+                                output_file,
+                            )
+                        else:
+                            self.log.info(
+                                "Segment %d is too short or too long (%.2f seconds), skipping..",
+                                segment_counter,
+                                segment_duration,
+                            )
+                        segment_counter += 1
+                        start_time = silence_end
+                except KeyboardInterrupt:
+                    break
 
 
 if __name__ == "__main__":
@@ -130,8 +165,8 @@ if __name__ == "__main__":
     segmenter = AudioSegmenter(
         input_file=args.input_file,
         output_path=args.output_path,
-        min_segment=args.min_segment,
-        max_segment=args.max_segment,
+        min_segment_duration=args.min_segment,
+        max_segment_duration=args.max_segment,
         silence_noise=args.silence_noise,
         silence_duration=args.silence_duration,
         overwrite=args.overwrite,

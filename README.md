@@ -26,8 +26,14 @@ ffmpeg -f avfoundation -list_devices true -i ""
 # [AVFoundation indev @ 0x14f0051b0] [2] BlackHole 16ch
 # [AVFoundation indev @ 0x14f0051b0] [3] iPhone Microphone
 
-# Record audio from XIT stick
+# Record audio from XIT stick into a file
 ffmpeg -f avfoundation -i "none:2" -vn output.wav
+
+# Record audio from XIT stick into a file, with a timestamp in the filename
+ffmpeg -f avfoundation -i "none:2" -vn -strftime 1 %Y-%m-%dT%H%M%S%z.wav
+
+# Record audio from a stream, detect silence and output original audio to a file at the same time.
+ffmpeg -f avfoundation -i ":2" -af "silencedetect=noise=-100dB:d=0.8" -f null output.wav
 ```
 
 
