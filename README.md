@@ -3,15 +3,35 @@ A POC system for recording, recognizing, and storing TV commercials with real-ti
 
 ---
 
-### Get audio from TV
+### Record TV audio with ffmpeg
 
-Get audio from XIT stick using BlackHole audio driver & Ableton Live or ffmpeg to record.
-https://github.com/ExistentialAudio/BlackHole
+Purchase an [XIT stick](https://www.pixela.co.jp/products/xit/stk100/) and install the software.
 
-If using ffmpeg, you can record like this:
+Install and setup the [BlackHole](https://github.com/ExistentialAudio/BlackHole) audio driver to capture audio from XIT stick.
+
+To record audio from XIT stick, select `BlackHole 16ch` as the audio output device, then use ffmpeg to record the audio.
+
+![macos-sound-blackhold-output](./images/macos-sound-blackhole-output.png)
+
+```shell
+# Find the device name
+ffmpeg -f avfoundation -list_devices true -i ""
+# [AVFoundation indev @ 0x14f0051b0] AVFoundation video devices:
+# [AVFoundation indev @ 0x14f0051b0] [0] FaceTime HD Camera
+# [AVFoundation indev @ 0x14f0051b0] [1] iPhone Camera
+# [AVFoundation indev @ 0x14f0051b0] [2] Capture screen 0
+# [AVFoundation indev @ 0x14f0051b0] AVFoundation audio devices:
+# [AVFoundation indev @ 0x14f0051b0] [0] MacBook Pro Microphone
+# [AVFoundation indev @ 0x14f0051b0] [1] Microsoft Teams Audio
+# [AVFoundation indev @ 0x14f0051b0] [2] BlackHole 16ch
+# [AVFoundation indev @ 0x14f0051b0] [3] iPhone Microphone
+
+# Record audio from XIT stick
+ffmpeg -f avfoundation -i "none:2" -vn output.wav
 ```
-ffmpeg -f avfoundation -i ":0" -vn output.wav
-```
+
+
+---
 
 To record into segments of 5 minutes, do this:
 ```
