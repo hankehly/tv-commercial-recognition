@@ -1,22 +1,23 @@
 import argparse
-import re
+import tempfile
+import datetime
 import logging
+import re
 from pathlib import Path
+from subprocess import PIPE, Popen
 from typing import Any
 
 import ffmpeg
 from pydantic import BaseModel
-import datetime
-from subprocess import Popen, PIPE
 
 
 class AudioSegmenter(BaseModel):
-    input_file: str
+    input_audio_device: str
     output_path: str
     min_segment_duration: float = 10
     max_segment_duration: float = 60
-    silence_noise: int = -100
-    silence_duration: float = 0.8
+    detect_silence_noise: int = -100
+    detect_silence_duration: float = 0.8
     overwrite: bool = False
     _log: logging.Logger = None
 
@@ -39,91 +40,90 @@ class AudioSegmenter(BaseModel):
         )
 
     def execute(self):
-        # out, _ = (
-        #     ffmpeg.input(self.input_file)
-        #     .filter(
-        #         "silencedetect",
-        #         noise=f"{self.silence_noise}dB",
-        #         d=self.silence_duration,
-        #     )
-        #     .filter("ametadata", mode="print", file="-")
-        #     .output("-", format="null")
-        #     .overwrite_output()
-        #     .run(quiet=True)
-        # )
-
         Path(self.output_path).mkdir(parents=True, exist_ok=self.overwrite)
-        # input_file_extension = Path(self.input_file).suffix
-        input_file_extension = ".wav"
 
-        start_time = None
-        segment_counter = 0
+        # If the input audio is silent from the beginning, then the first segment will be something like 0.05 seconds long,
+        # which is too short and will be skipped automatically.
+        start_time = 0.0
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"output_{timestamp}.wav"
-
-        with Popen(
-            [
+        with tempfile.NamedTemporaryFile(suffix=".wav", dir=self.output_path) as file:
+            audio_file = str(Path(self.output_path) / file.name)
+            cmd = [
                 "ffmpeg",
+                "-y",
                 "-f",
                 "avfoundation",
                 "-i",
-                ":2",
+                f":{self.input_audio_device}",
                 "-af",
-                "silencedetect=noise=-100dB:d=0.8",
+                f"silencedetect=noise={self.detect_silence_noise}dB:d={self.detect_silence_duration}",
                 "-f",
                 "wav",
-                filename,
-            ],
-            stderr=PIPE,
-        ) as p:
-            while True:
-                try:
-                    line = p.stderr.read1().decode("utf-8")
-                    silence_end_match = re.search(r"silence_end: (\d+\.\d+) \| silence_duration: (\d+\.\d+)", line)
-
-                    if silence_end_match:
-                        silence_end = float(silence_end_match.group(1))
-                        silence_dur = float(silence_end_match.group(2))
-                        if start_time is None:
+                audio_file,
+            ]
+            with Popen(cmd, stderr=PIPE) as p:
+                while True:
+                    try:
+                        line = p.stderr.read1().decode("utf-8")
+                        silence_end_match = re.search(
+                            r"silence_end: (\d+\.\d+) \| silence_duration: (\d+\.\d+)",
+                            line,
+                        )
+                        if silence_end_match:
+                            silence_end = float(silence_end_match.group(1))
+                            silence_duration = float(silence_end_match.group(2))
+                            segment_duration = (
+                                silence_end - silence_duration - start_time
+                            )
+                            bound_lower_ok = (
+                                segment_duration >= self.min_segment_duration
+                            )
+                            bound_upper_ok = (
+                                segment_duration <= self.max_segment_duration
+                            )
+                            if bound_lower_ok and bound_upper_ok:
+                                ts = datetime.datetime.now().strftime(
+                                    "%Y-%m-%d_%H-%M-%S"
+                                )
+                                output_file = f"{self.output_path}/segment_{ts}.wav"
+                                output_stream = ffmpeg.input(
+                                    audio_file,
+                                    ss=start_time,
+                                    to=silence_end - silence_duration,
+                                )
+                                output_stream.output(
+                                    output_file, acodec="copy"
+                                ).overwrite_output().run(quiet=True)
+                                # For some reason clips still have a tiny bit of silence at the end,
+                                # so I try to run silenceremove to remove it, but it doesn't work.
+                                # ffmpeg.input(output_file).filter(
+                                #     "silenceremove",
+                                #     stop_periods=1,
+                                #     stop_threshold="-100dB",
+                                # ).output(f"{self.output_path}/segment_{ts}_silenceremove.wav").overwrite_output().run(quiet=True)
+                                self.log.info(
+                                    "Saved segment (%.2f seconds) to %s",
+                                    segment_duration,
+                                    output_file,
+                                )
+                            else:
+                                self.log.info(
+                                    "Segment is too short or too long (%.2f seconds), skipping..",
+                                    segment_duration,
+                                )
                             start_time = silence_end
-                            continue
-                        print(f"start_time: {start_time}, silence_end: {silence_end}, silence_dur: {silence_dur}", flush=True)
-                        segment_duration = silence_end - silence_dur - start_time
-                        bound_lower_ok = segment_duration >= self.min_segment_duration
-                        bound_upper_ok = segment_duration <= self.max_segment_duration
-                        if bound_lower_ok and bound_upper_ok:
-                            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                            output_file = f"{self.output_path}/segment_{ts}.wav"
-                            output_stream = ffmpeg.input(
-                                filename, ss=start_time, to=silence_end-silence_dur
-                            )
-                            output_stream.output(
-                                output_file, acodec="copy"
-                            ).overwrite_output().run()
-                            self.log.info(
-                                "Saved segment %d (%.2f seconds) to %s",
-                                segment_counter,
-                                segment_duration,
-                                output_file,
-                            )
-                        else:
-                            self.log.info(
-                                "Segment %d is too short or too long (%.2f seconds), skipping..",
-                                segment_counter,
-                                segment_duration,
-                            )
-                        segment_counter += 1
-                        start_time = silence_end
-                except KeyboardInterrupt:
-                    break
+                    except KeyboardInterrupt:
+                        break
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Segment audio based on silence detection."
     )
-    parser.add_argument("input_file", help="Input audio file")
+    parser.add_argument(
+        "input_audio_device",
+        help="Input audio device, e.g. 2 (obtain with `ffmpeg -f avfoundation -list_devices true -i `)",
+    )
     parser.add_argument("output_path", help="Output directory or path for segments")
     parser.add_argument(
         "--min-segment",
@@ -138,13 +138,13 @@ if __name__ == "__main__":
         help="Maximum segment duration in seconds (default: 60)",
     )
     parser.add_argument(
-        "--silence-noise",
+        "--detect-silence-noise",
         type=int,
         default=-100,
         help="Silencedetect noise level in dB (default: -100)",
     )
     parser.add_argument(
-        "--silence-duration",
+        "--detect-silence-duration",
         type=float,
         default=0.8,
         help="Silencedetect duration threshold in seconds (default: 0.8)",
@@ -163,12 +163,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     segmenter = AudioSegmenter(
-        input_file=args.input_file,
+        input_audio_device=args.input_audio_device,
         output_path=args.output_path,
+        detect_silence_noise=args.detect_silence_noise,
+        detect_silence_duration=args.detect_silence_duration,
         min_segment_duration=args.min_segment,
         max_segment_duration=args.max_segment,
-        silence_noise=args.silence_noise,
-        silence_duration=args.silence_duration,
         overwrite=args.overwrite,
     )
     segmenter.configure_logging(args.log_level)
