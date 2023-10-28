@@ -2,12 +2,13 @@ import argparse
 import datetime
 import logging
 import re
-import tempfile
+from tempfile import NamedTemporaryFile
 from pathlib import Path
 from subprocess import PIPE, Popen
 from typing import Any
 
-import pydub
+from pydub import AudioSegment
+from pydub.silence import detect_leading_silence
 from pydantic import BaseModel
 
 
@@ -41,75 +42,64 @@ class AudioSegmenter(BaseModel):
 
     def execute(self):
         Path(self.output_path).mkdir(parents=True, exist_ok=self.overwrite)
-
-        # If the input audio is silent from the beginning, then the first segment will be something like 0.05 seconds long,
-        # which is too short and will be skipped automatically.
-        start_time = 0.0
-
-        with tempfile.NamedTemporaryFile(suffix=".wav", dir=self.output_path) as file:
-            audio_file = str(Path(self.output_path) / file.name)
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "avfoundation",
-                "-i",
-                f":{self.input_audio_device}",
-                "-af",
-                f"silencedetect=noise={self.detect_silence_noise}dB:d={self.detect_silence_duration}",
-                "-f",
-                "wav",
-                audio_file,
+        # If the input audio is silent from the beginning, the first segment will be something like 0.05 seconds long,
+        # which is too short and will be filtered out later.
+        next_segment_start = 0.0
+        with NamedTemporaryFile(suffix=".wav", dir=self.output_path) as tmp:
+            tmp_audio_path = str(Path(self.output_path) / tmp.name)
+            # fmt: off
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-f", "avfoundation", "-i", f":{self.input_audio_device}",
+                "-af", f"silencedetect=noise={self.detect_silence_noise}dB:d={self.detect_silence_duration}",
+                "-f", "wav", tmp_audio_path,
             ]
-            with Popen(cmd, stderr=PIPE) as p:
+            # fmt: on
+            pattern = r"silence_end: (\d+\.\d+) \| silence_duration: (\d+\.\d+)"
+            with Popen(ffmpeg_cmd, stderr=PIPE) as p:
                 while True:
                     try:
                         line = p.stderr.read1().decode("utf-8")
-                        silence_end_match = re.search(
-                            r"silence_end: (\d+\.\d+) \| silence_duration: (\d+\.\d+)",
-                            line,
-                        )
-                        if silence_end_match:
-                            silence_end = float(silence_end_match.group(1))
-                            silence_duration = float(silence_end_match.group(2))
-                            segment_duration = (
-                                silence_end - silence_duration - start_time
+                        match = re.search(pattern, line)
+                        if match:
+                            silence_end = float(match.group(1))
+                            silence_duration = float(match.group(2))
+                            self._export_segment(
+                                next_segment_start,
+                                tmp_audio_path,
+                                silence_end,
+                                silence_duration,
                             )
-                            if (
-                                self.min_segment_duration
-                                <= segment_duration
-                                <= self.max_segment_duration
-                            ):
-                                ts = datetime.datetime.now().strftime(
-                                    "%Y-%m-%d_%H-%M-%S"
-                                )
-                                output_file = f"{self.output_path}/segment_{ts}_{silence_duration}s.wav"
-                                segment = pydub.AudioSegment.from_wav(audio_file)[
-                                    start_time
-                                    * 1000 : (silence_end - silence_duration)
-                                    * 1000
-                                ]
-                                extra_silence_length = (
-                                    pydub.silence.detect_leading_silence(
-                                        segment.reverse(), silence_threshold=-100
-                                    )
-                                )
-                                segment[:-extra_silence_length].export(
-                                    output_file, format="wav"
-                                )
-                                self.log.info(
-                                    "Saved segment (%.2f seconds) to %s",
-                                    segment_duration,
-                                    output_file,
-                                )
-                            else:
-                                self.log.info(
-                                    "Segment is too short or too long (%.2f seconds), skipping..",
-                                    segment_duration,
-                                )
-                            start_time = silence_end
+                            next_segment_start = silence_end
                     except KeyboardInterrupt:
                         break
+
+    def _export_segment(
+        self,
+        segment_start: float,
+        audio_file_path: str,
+        silence_end: float,
+        silence_duration: float,
+    ):
+        segment_duration = silence_end - silence_duration - segment_start
+        if self.min_segment_duration <= segment_duration <= self.max_segment_duration:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            export_path = f"{self.output_path}/segment_{timestamp}_{round(segment_duration, 1)}s.wav"
+            segment_start_ms = segment_start * 1000
+            segment_end_ms = (silence_end - silence_duration) * 1000
+            segment = AudioSegment.from_wav(audio_file_path)
+            segment = segment[segment_start_ms:segment_end_ms]
+            segment_end_silence_ms = detect_leading_silence(
+                segment.reverse(), silence_threshold=self.detect_silence_noise
+            )
+            segment[:-segment_end_silence_ms].export(export_path, format="wav")
+            self.log.info(
+                "Saved segment (%.2f seconds) to %s", segment_duration, export_path
+            )
+        else:
+            self.log.info(
+                "Segment is too short or too long (%.2f seconds), skipping..",
+                segment_duration,
+            )
 
 
 if __name__ == "__main__":
