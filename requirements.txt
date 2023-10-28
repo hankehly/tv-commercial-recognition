@@ -1,2 +1,2 @@
-ffmpeg-python==0.2.0
 pydantic==2.4.2
+pydub==0.25.1

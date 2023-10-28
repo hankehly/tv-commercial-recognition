@@ -1,13 +1,13 @@
 import argparse
-import tempfile
 import datetime
 import logging
 import re
+import tempfile
 from pathlib import Path
 from subprocess import PIPE, Popen
 from typing import Any
 
-import ffmpeg
+import pydub
 from pydantic import BaseModel
 
 
@@ -75,32 +75,28 @@ class AudioSegmenter(BaseModel):
                             segment_duration = (
                                 silence_end - silence_duration - start_time
                             )
-                            bound_lower_ok = (
-                                segment_duration >= self.min_segment_duration
-                            )
-                            bound_upper_ok = (
-                                segment_duration <= self.max_segment_duration
-                            )
-                            if bound_lower_ok and bound_upper_ok:
+                            if (
+                                self.min_segment_duration
+                                <= segment_duration
+                                <= self.max_segment_duration
+                            ):
                                 ts = datetime.datetime.now().strftime(
                                     "%Y-%m-%d_%H-%M-%S"
                                 )
-                                output_file = f"{self.output_path}/segment_{ts}.wav"
-                                output_stream = ffmpeg.input(
-                                    audio_file,
-                                    ss=start_time,
-                                    to=silence_end - silence_duration,
+                                output_file = f"{self.output_path}/segment_{ts}_{silence_duration}s.wav"
+                                segment = pydub.AudioSegment.from_wav(audio_file)[
+                                    start_time
+                                    * 1000 : (silence_end - silence_duration)
+                                    * 1000
+                                ]
+                                extra_silence_length = (
+                                    pydub.silence.detect_leading_silence(
+                                        segment.reverse(), silence_threshold=-100
+                                    )
                                 )
-                                output_stream.output(
-                                    output_file, acodec="copy"
-                                ).overwrite_output().run(quiet=True)
-                                # For some reason clips still have a tiny bit of silence at the end,
-                                # so I try to run silenceremove to remove it, but it doesn't work.
-                                # ffmpeg.input(output_file).filter(
-                                #     "silenceremove",
-                                #     stop_periods=1,
-                                #     stop_threshold="-100dB",
-                                # ).output(f"{self.output_path}/segment_{ts}_silenceremove.wav").overwrite_output().run(quiet=True)
+                                segment[:-extra_silence_length].export(
+                                    output_file, format="wav"
+                                )
                                 self.log.info(
                                     "Saved segment (%.2f seconds) to %s",
                                     segment_duration,
@@ -122,9 +118,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "input_audio_device",
-        help="Input audio device, e.g. 2 (obtain with `ffmpeg -f avfoundation -list_devices true -i `)",
+        help='Input audio device, e.g. 2 (obtain with `ffmpeg -f avfoundation -list_devices true -i ""`)',
     )
-    parser.add_argument("output_path", help="Output directory or path for segments")
+    parser.add_argument("output_path", help="Output directory for segments")
     parser.add_argument(
         "--min-segment",
         type=float,
