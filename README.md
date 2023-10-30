@@ -121,3 +121,10 @@ lavfi.silence_end=66.4555
 lavfi.silence_duration=1.01304
 ...
 ```
+
+
+### Processes
+
+* A process to record audio from TV and save commercials to files.
+* A process to fingerprint the commercial audio and store the fingerprints in a database.
+* A process to listen to the audio stream, match the audio against the fingerprints in the database and take action when a commercial is detected.
