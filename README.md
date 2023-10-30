@@ -128,3 +128,76 @@ lavfi.silence_duration=1.01304
 * A process to record audio from TV and save commercials to files.
 * A process to fingerprint the commercial audio and store the fingerprints in a database.
 * A process to listen to the audio stream, match the audio against the fingerprints in the database and take action when a commercial is detected.
+
+### Hiccups/Things tried
+
+Tried to use emy/soundfingerprinting combination, but for the below reasons gave up
+- unable to delete fingerprints (errors in web ui)
+- uses C# which I do not know well
+- emy is not open source so scaling would require payment
+
+The following program worked, but dejavu was just easier to deal with..
+
+```csharp
+namespace Emy.Test
+{
+    using System;
+    using System.IO;
+    using System.Threading.Tasks;
+    using SoundFingerprinting.Audio;
+    using SoundFingerprinting.Builder;
+    using SoundFingerprinting.Data;
+    using SoundFingerprinting.Emy;
+
+    class Program
+    {
+        private static readonly EmyModelService ModelService = EmyModelService.NewInstance("localhost", 3399);
+        private static readonly IAudioService AudioService = new FFmpegAudioService();
+
+        static async Task Main(string[] args)
+        {
+            if (args.Length < 1)
+            {
+                Console.WriteLine("Specify directory for inserting data");
+                return;
+            }
+
+
+            var directory = args[0];
+            foreach (string file in Directory.GetFiles(directory))
+            {
+                if (ModelService.ReadTrackById(file) != null)
+                {
+                    Console.WriteLine($"We've already inserted {file}. Skipping.");
+                    continue;
+                }
+
+                var track = new TrackInfo(file, Path.GetFileNameWithoutExtension(file), string.Empty);
+                var hashes = await FingerprintCommandBuilder
+                    .Instance
+                    .BuildFingerprintCommand()
+                    .From(file)
+                    .UsingServices(AudioService)
+                    .Hash();
+
+                ModelService.Insert(track, hashes);
+                Console.WriteLine($"Inserted {file} with {hashes.Count} fingerprints.");
+            }
+        }
+    }
+}
+```
+
+
+#### Unable to fork in MacOS celery
+
+Some celery tasks were failing with a weird process fork related error.
+I fixed it by disabling a mac security feature.
+
+https://stackoverflow.com/questions/50168647/multiprocessing-causes-python-to-crash-and-gives-an-error-may-have-been-in-progr
+
+```shell
+# ~/.zshrc
+# Allow forking from celery tasks
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+```
