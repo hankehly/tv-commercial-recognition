@@ -1,8 +1,8 @@
 import argparse
-import signal
 import datetime
 import logging
 import re
+import signal
 from pathlib import Path
 from subprocess import PIPE, Popen
 from tempfile import NamedTemporaryFile
@@ -12,11 +12,20 @@ from pydantic import BaseModel
 from pydub import AudioSegment
 from pydub.silence import detect_leading_silence
 
+from tv_commercial_recognition.tasks import fingerprint_audio
+
+
+def null_hook(export_path):
+    pass
+
 
 class AudioSegmenter(BaseModel):
     """
     A class for segmenting audio files based on silence detection.
     Requires ffmpeg to be installed.
+
+    The input to this class is an audio device, e.g. the laptop microphone or internal loopback device.
+    If needed, it can be adjusted to read from a file instead.
     """
 
     input_audio_device: str
@@ -26,6 +35,7 @@ class AudioSegmenter(BaseModel):
     detect_silence_noise: int = -100
     detect_silence_duration: float = 0.8
     overwrite: bool = False
+    after_export_hook: Any = null_hook
     _log: logging.Logger = None
     _shutdown: bool = False
 
@@ -120,11 +130,16 @@ class AudioSegmenter(BaseModel):
             self.log.info(
                 "Saved segment (%.2f seconds) to %s", segment_duration, export_path
             )
+            self.after_export_hook(export_path)
         else:
             self.log.info(
                 "Segment is too short or too long (%.2f seconds), skipping..",
                 segment_duration,
             )
+
+
+def after_export_hook(export_path):
+    fingerprint_audio.delay(export_path)
 
 
 if __name__ == "__main__":
@@ -173,6 +188,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
     segmenter = AudioSegmenter(
         input_audio_device=args.input_audio_device,
         output_path=args.output_path,
@@ -181,6 +197,7 @@ if __name__ == "__main__":
         min_segment_duration=args.min_segment,
         max_segment_duration=args.max_segment,
         overwrite=args.overwrite,
+        after_export_hook=after_export_hook,
     )
     segmenter.configure_logging(args.log_level)
     segmenter.execute()
