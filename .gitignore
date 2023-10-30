@@ -2,3 +2,4 @@ data/**
 !data/.gitkeep
 .venv
 *.wav
+__pycache__
