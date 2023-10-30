@@ -1,15 +1,16 @@
 import argparse
+import signal
 import datetime
 import logging
 import re
-from tempfile import NamedTemporaryFile
 from pathlib import Path
 from subprocess import PIPE, Popen
+from tempfile import NamedTemporaryFile
 from typing import Any
 
+from pydantic import BaseModel
 from pydub import AudioSegment
 from pydub.silence import detect_leading_silence
-from pydantic import BaseModel
 
 
 class AudioSegmenter(BaseModel):
@@ -21,6 +22,7 @@ class AudioSegmenter(BaseModel):
     detect_silence_duration: float = 0.8
     overwrite: bool = False
     _log: logging.Logger = None
+    _shutdown: bool = False
 
     @property
     def log(self) -> logging.Logger:
@@ -40,8 +42,20 @@ class AudioSegmenter(BaseModel):
             f"{self.__class__.__module__}.{self.__class__.__name__}"
         )
 
+    def _check_shutdown(func):
+        def wrapper(self, *args, **kwargs):
+            if self._shutdown:
+                self.log.info("Shutting down...")
+                return
+            return func(self, *args, **kwargs)
+
+        return wrapper
+
+    @_check_shutdown
     def execute(self):
         Path(self.output_path).mkdir(parents=True, exist_ok=self.overwrite)
+        # Handle SIGTERM gracefully
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
         # If the input audio is silent from the beginning, the first segment will be something like 0.05 seconds long,
         # which is too short and will be filtered out later.
         next_segment_start = 0.0
@@ -56,7 +70,7 @@ class AudioSegmenter(BaseModel):
             # fmt: on
             pattern = r"silence_end: (\d+\.\d+) \| silence_duration: (\d+\.\d+)"
             with Popen(ffmpeg_cmd, stderr=PIPE) as p:
-                while True:
+                while not self._shutdown:
                     try:
                         line = p.stderr.read1().decode("utf-8")
                         match = re.search(pattern, line)
@@ -71,8 +85,14 @@ class AudioSegmenter(BaseModel):
                             )
                             next_segment_start = silence_end
                     except KeyboardInterrupt:
-                        break
+                        self.log.info("Received KeyboardInterrupt, shutting down...")
+                        self._shutdown = True
 
+    def _handle_sigterm(self, *args):
+        self.log.info("Received SIGTERM, shutting down...")
+        self._shutdown = True
+
+    @_check_shutdown
     def _export_segment(
         self,
         segment_start: float,
