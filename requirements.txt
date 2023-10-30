@@ -1,2 +1,4 @@
 pydantic==2.4.2
 pydub==0.25.1
+celery[librabbitmq]==5.3.4
+git+https://github.com/hankehly/dejavu.git@develop
