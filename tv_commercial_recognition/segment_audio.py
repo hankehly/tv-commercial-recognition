@@ -14,6 +14,11 @@ from pydub.silence import detect_leading_silence
 
 
 class AudioSegmenter(BaseModel):
+    """
+    A class for segmenting audio files based on silence detection.
+    Requires ffmpeg to be installed.
+    """
+
     input_audio_device: str
     output_path: str
     min_segment_duration: float = 10
