@@ -193,11 +193,31 @@ namespace Emy.Test
 
 Some celery tasks were failing with a weird process fork related error.
 I fixed it by disabling a mac security feature.
+Don't do this in `~/.zshrc`, just on a case by case basis.
 
 https://stackoverflow.com/questions/50168647/multiprocessing-causes-python-to-crash-and-gives-an-error-may-have-been-in-progr
 
 ```shell
-# ~/.zshrc
-# Allow forking from celery tasks
-export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES celery -A tv_commercial_recognition.tasks worker --loglevel=info
 ```
+
+#### Capturing a stream of data
+
+https://lucadrf.dev/blog/python-subprocess-buffers/
+
+```
+with Popen(stderr=pipe) as p
+    while true
+        if condition:
+            p.terminate  # << this is necessary to get out of the loop. break alone wont work
+            break
+```
+
+#### Output audio files are too big
+
+A 4.7 second WAV file segment was taking up 6.6 MB of space.
+I tried adjusting the bitrate first because it was like 11289 kb/s which is way too high,
+but this didn't have an effect.
+
+Then I read that WAV is uncompressed and MP3 is compressed, so I tried MP3 instead and
+that really reduced the file size.

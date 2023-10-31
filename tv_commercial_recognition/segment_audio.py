@@ -1,11 +1,12 @@
 import argparse
 import datetime
 import logging
+import os
 import re
 import signal
+import time
 from pathlib import Path
 from subprocess import PIPE, Popen
-from tempfile import NamedTemporaryFile
 from typing import Any
 
 from pydantic import BaseModel
@@ -36,6 +37,8 @@ class AudioSegmenter(BaseModel):
     detect_silence_duration: float = 0.8
     overwrite: bool = False
     after_export_hook: Any = null_hook
+    max_temp_file_size_bytes: int = 128 * 1024 * 1024  # 128 MB by default
+
     _log: logging.Logger = None
     _shutdown: bool = False
 
@@ -66,32 +69,68 @@ class AudioSegmenter(BaseModel):
 
         return wrapper
 
+    @property
+    def segments_path(self) -> Path:
+        return Path(self.output_path) / "segments"
+
+    @property
+    def recorded_audio_path(self) -> Path:
+        return Path(self.output_path) / "recorded_audio"
+
     @_check_shutdown
     def execute(self):
-        Path(self.output_path).mkdir(parents=True, exist_ok=self.overwrite)
+        # Create output directory
+        self.segments_path.mkdir(parents=True, exist_ok=self.overwrite)
+        self.recorded_audio_path.mkdir(parents=True, exist_ok=self.overwrite)
+
+        if self.overwrite:
+            self.log.info("Overwriting existing output directory")
+
         # Handle SIGTERM gracefully
         signal.signal(signal.SIGTERM, self._handle_sigterm)
-        # If the input audio is silent from the beginning, the first segment will be something like 0.05 seconds long,
-        # which is too short and will be filtered out later.
-        next_segment_start = 0.0
-        with NamedTemporaryFile(suffix=".wav", dir=self.output_path) as tmp:
-            tmp_audio_path = str(Path(self.output_path) / tmp.name)
-            # fmt: off
+
+        silence_pattern = r"silence_end: (\d+\.\d+) \| silence_duration: (\d+\.\d+)"
+
+        while not self._shutdown:
+            # Define a unique temporary file name based on the current timestamp
+            timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
+            tmp_audio_path = str(self.recorded_audio_path / f"temp_{timestamp}.mp3")
+
             ffmpeg_cmd = [
-                "ffmpeg", "-y", "-f", "avfoundation", "-i", f":{self.input_audio_device}",
-                "-af", f"silencedetect=noise={self.detect_silence_noise}dB:d={self.detect_silence_duration}",
-                "-f", "wav", tmp_audio_path,
+                "ffmpeg",
+                "-y",
+                "-f",
+                "avfoundation",
+                "-i",
+                f":{self.input_audio_device}",
+                "-af",
+                f"silencedetect=noise={self.detect_silence_noise}dB:d={self.detect_silence_duration}",
+                "-vn",
+                "-b:a",
+                "128k",
+                "-f",
+                "mp3",  # use mp3 over wav prevent large file sizes
+                tmp_audio_path,
             ]
-            # fmt: on
-            pattern = r"silence_end: (\d+\.\d+) \| silence_duration: (\d+\.\d+)"
+
+            # If the input audio is silent from the beginning, the first segment will be something like 0.05 seconds long,
+            # which is too short and will be filtered out later.
+            next_segment_start = 0.0
+
+            self.log.info("Starting ffmpeg process...")
             with Popen(ffmpeg_cmd, stderr=PIPE) as p:
                 while not self._shutdown:
                     try:
                         line = p.stderr.read1().decode("utf-8")
-                        match = re.search(pattern, line)
+                        match = re.search(silence_pattern, line)
                         if match:
                             silence_end = float(match.group(1))
                             silence_duration = float(match.group(2))
+                            self.log.debug(
+                                "Found silence at %.2f seconds, duration %.2f seconds",
+                                silence_end,
+                                silence_duration,
+                            )
                             self._export_segment(
                                 next_segment_start,
                                 tmp_audio_path,
@@ -99,6 +138,18 @@ class AudioSegmenter(BaseModel):
                                 silence_duration,
                             )
                             next_segment_start = silence_end
+                            file_size = os.path.getsize(tmp_audio_path)
+                            file_too_big = file_size > self.max_temp_file_size_bytes
+                            if file_too_big:
+                                self.log.info(
+                                    f"Temporary file is too big ({file_size} bytes), restarting ffmpeg process..."
+                                )
+                                p.terminate()  # necessary to prevent hanging
+                                break
+                            else:
+                                self.log.info(
+                                    f"Temporary file size is {file_size} bytes"
+                                )
                     except KeyboardInterrupt:
                         self.log.info("Received KeyboardInterrupt, shutting down...")
                         self._shutdown = True
@@ -117,16 +168,16 @@ class AudioSegmenter(BaseModel):
     ):
         segment_duration = silence_end - silence_duration - segment_start
         if self.min_segment_duration <= segment_duration <= self.max_segment_duration:
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            export_path = f"{self.output_path}/segment_{timestamp}_{round(segment_duration, 1)}s.wav"
+            timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
+            export_path = str(self.segments_path / f"segment_{timestamp}.mp3")
             segment_start_ms = segment_start * 1000
             segment_end_ms = (silence_end - silence_duration) * 1000
-            segment = AudioSegment.from_wav(audio_file_path)
+            segment = AudioSegment.from_mp3(audio_file_path)
             segment = segment[segment_start_ms:segment_end_ms]
             segment_end_silence_ms = detect_leading_silence(
                 segment.reverse(), silence_threshold=self.detect_silence_noise
             )
-            segment[:-segment_end_silence_ms].export(export_path, format="wav")
+            segment[:-segment_end_silence_ms].export(export_path, format="mp3")
             self.log.info(
                 "Saved segment (%.2f seconds) to %s", segment_duration, export_path
             )
@@ -186,9 +237,14 @@ if __name__ == "__main__":
         choices=["debug", "info", "warning", "error", "critical"],
         help="Set the log level (default: info)",
     )
+    parser.add_argument(
+        "--max-temp-file-size-bytes",
+        type=int,
+        default=128 * 1024 * 1024,
+        help="Maximum temporary file size in bytes (default: 128 MB)",
+    )
 
     args = parser.parse_args()
-
     segmenter = AudioSegmenter(
         input_audio_device=args.input_audio_device,
         output_path=args.output_path,
@@ -198,6 +254,7 @@ if __name__ == "__main__":
         max_segment_duration=args.max_segment,
         overwrite=args.overwrite,
         after_export_hook=after_export_hook,
+        max_temp_file_size_bytes=args.max_temp_file_size_bytes,
     )
     segmenter.configure_logging(args.log_level)
     segmenter.execute()

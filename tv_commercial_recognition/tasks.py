@@ -3,6 +3,7 @@ import logging
 from celery import Celery
 from dejavu import Dejavu
 
+# OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES celery -A tv_commercial_recognition.tasks worker --loglevel=INFO
 app = Celery("tasks", broker="pyamqp://guest@localhost//")
 app.conf.update(
     task_serializer="json",
