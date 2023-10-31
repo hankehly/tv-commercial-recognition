@@ -221,3 +221,5 @@ but this didn't have an effect.
 
 Then I read that WAV is uncompressed and MP3 is compressed, so I tried MP3 instead and
 that really reduced the file size.
+
+A bitrate of 128k is supposedly the threshold for "good" quality, so I went with that.
