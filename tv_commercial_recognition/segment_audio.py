@@ -147,13 +147,14 @@ class AudioSegmenter(BaseModel):
                                     f"Temporary file is too big ({file_size} bytes), restarting ffmpeg process..."
                                 )
                                 p.terminate()  # necessary to prevent hanging
-                                break
+                                break  # restart ffmpeg process
                             else:
                                 self.log.info(
                                     f"Temporary file size is {file_size} bytes"
                                 )
                     except KeyboardInterrupt:
                         self.log.info("Received KeyboardInterrupt, shutting down...")
+                        p.terminate()
                         self._shutdown = True
 
     def _handle_sigterm(self, *args):
@@ -179,9 +180,17 @@ class AudioSegmenter(BaseModel):
             segment_end_silence_ms = detect_leading_silence(
                 segment.reverse(), silence_threshold=self.detect_silence_noise
             )
-            segment[:-segment_end_silence_ms].export(export_path, format="mp3")
+            # If the silence is 0.0 seconds, the segment will be empty
+            # >>> [1, 2, 3][:-0]
+            # []
+            if segment_end_silence_ms > 0:
+                segment = segment[:-segment_end_silence_ms]
+            segment.export(export_path, format="mp3")
             self.log.info(
-                "Saved segment (%.2f seconds) to %s", segment_duration, export_path
+                "Saved segment (%.2f seconds) to %s, end silence: %d ms",
+                len(segment[:-segment_end_silence_ms]),
+                export_path,
+                segment_end_silence_ms,
             )
             self.after_export_hook(export_path)
         else:
