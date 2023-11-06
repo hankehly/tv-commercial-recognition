@@ -188,7 +188,7 @@ class AudioSegmenter(BaseModel):
             segment.export(export_path, format="mp3")
             self.log.info(
                 "Saved segment (%.2f seconds) to %s, end silence: %d ms",
-                len(segment[:-segment_end_silence_ms]),
+                len(segment) / 1000,
                 export_path,
                 segment_end_silence_ms,
             )
