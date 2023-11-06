@@ -98,18 +98,20 @@ class AudioSegmenter(BaseModel):
 
             ffmpeg_cmd = [
                 "ffmpeg",
-                "-y",
+                "-y",  # overwrite output file if it exists
                 "-f",
                 "avfoundation",
                 "-i",
                 f":{self.input_audio_device}",
+                "-flush_packets",  # disable output buffering
+                "1",
+                "-ac",  # convert to mono
+                "1",
                 "-af",
                 f"silencedetect=noise={self.detect_silence_noise}dB:d={self.detect_silence_duration}",
-                "-vn",
-                "-b:a",
-                "128k",
+                "-vn",  # disable video recording
                 "-f",
-                "mp3",  # use mp3 over wav prevent large file sizes
+                "mp3",  # use mp3 instead of wav to reduce file size
                 tmp_audio_path,
             ]
 
@@ -253,7 +255,7 @@ if __name__ == "__main__":
         min_segment_duration=args.min_segment,
         max_segment_duration=args.max_segment,
         overwrite=args.overwrite,
-        after_export_hook=after_export_hook,
+        # after_export_hook=after_export_hook,
         max_temp_file_size_bytes=args.max_temp_file_size_bytes,
     )
     segmenter.configure_logging(args.log_level)
