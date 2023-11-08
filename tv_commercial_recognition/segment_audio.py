@@ -1,10 +1,10 @@
 import argparse
-import datetime
 import logging
 import os
 import re
 import signal
 import time
+import json
 from pathlib import Path
 from subprocess import PIPE, Popen
 from typing import Any
@@ -34,13 +34,16 @@ class AudioSegmenter(BaseModel):
     min_segment_duration: float = 10
     max_segment_duration: float = 60
     detect_silence_noise: int = -100
-    detect_silence_duration: float = 0.8
+    detect_silence_duration: float = 0.75
     overwrite: bool = False
     after_export_hook: Any = null_hook
     max_temp_file_size_bytes: int = 128 * 1024 * 1024  # 128 MB by default
 
     _log: logging.Logger = None
     _shutdown: bool = False
+
+    def model_post_init(self, *args) -> None:
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
 
     @property
     def log(self) -> logging.Logger:
@@ -71,30 +74,27 @@ class AudioSegmenter(BaseModel):
 
     @property
     def segments_path(self) -> Path:
-        return Path(self.output_path) / "segments"
+        return Path(self.output_path) / "_segments"
 
     @property
-    def recorded_audio_path(self) -> Path:
-        return Path(self.output_path) / "recorded_audio"
+    def streams_path(self) -> Path:
+        return Path(self.output_path) / "_streams"
 
     @_check_shutdown
     def execute(self):
         # Create output directory
         self.segments_path.mkdir(parents=True, exist_ok=self.overwrite)
-        self.recorded_audio_path.mkdir(parents=True, exist_ok=self.overwrite)
+        self.streams_path.mkdir(parents=True, exist_ok=self.overwrite)
 
         if self.overwrite:
             self.log.info("Overwriting existing output directory")
-
-        # Handle SIGTERM gracefully
-        signal.signal(signal.SIGTERM, self._handle_sigterm)
 
         silence_pattern = r"silence_end: (\d+\.\d+) \| silence_duration: (\d+\.\d+)"
 
         while not self._shutdown:
             # Define a unique temporary file name based on the current timestamp
             timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
-            tmp_audio_path = str(self.recorded_audio_path / f"temp_{timestamp}.mp3")
+            tmp_audio_path = str(self.streams_path / f"temp_{timestamp}.mp3")
 
             ffmpeg_cmd = [
                 "ffmpeg",
@@ -133,6 +133,9 @@ class AudioSegmenter(BaseModel):
                                 silence_end,
                                 silence_duration,
                             )
+                            # give ffmpeg a chance to write the audio file to disk
+                            # otherwise segment file size may be 0 bytes
+                            time.sleep(0.25)
                             self._export_segment(
                                 next_segment_start,
                                 tmp_audio_path,
@@ -170,13 +173,14 @@ class AudioSegmenter(BaseModel):
         silence_duration: float,
     ):
         segment_duration = silence_end - silence_duration - segment_start
+        # todo: this condition checks the segment duration while it still has the silence
+        # at the end so this may not be the actual duration of the segment
         if self.min_segment_duration <= segment_duration <= self.max_segment_duration:
             timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
             export_path = str(self.segments_path / f"segment_{timestamp}.mp3")
-            segment_start_ms = segment_start * 1000
-            segment_end_ms = (silence_end - silence_duration) * 1000
-            segment = AudioSegment.from_mp3(audio_file_path)
-            segment = segment[segment_start_ms:segment_end_ms]
+            start_ms = segment_start * 1000
+            end_ms = (silence_end - silence_duration) * 1000
+            segment = AudioSegment.from_mp3(audio_file_path)[start_ms:end_ms]
             segment_end_silence_ms = detect_leading_silence(
                 segment.reverse(), silence_threshold=self.detect_silence_noise
             )
@@ -187,16 +191,24 @@ class AudioSegmenter(BaseModel):
                 segment = segment[:-segment_end_silence_ms]
             segment.export(export_path, format="mp3")
             self.log.info(
-                "Saved segment (%.2f seconds) to %s, end silence: %d ms",
-                len(segment) / 1000,
-                export_path,
-                segment_end_silence_ms,
+                json.dumps(
+                    {
+                        "message": "Segment saved",
+                        "segment_duration": len(segment) / 1000,
+                        "export_path": export_path,
+                        "segment_end_silence_ms": segment_end_silence_ms,
+                    }
+                )
             )
             self.after_export_hook(export_path)
         else:
             self.log.info(
-                "Segment is too short or too long (%.2f seconds), skipping..",
-                segment_duration,
+                json.dumps(
+                    {
+                        "message": "Segment is too short or too long",
+                        "segment_duration": segment_duration,
+                    }
+                )
             )
 
 
@@ -234,8 +246,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--detect-silence-duration",
         type=float,
-        default=0.8,
-        help="Silencedetect duration threshold in seconds (default: 0.8)",
+        default=0.75,
+        help="Silencedetect duration threshold in seconds (default: 0.75)",
     )
     parser.add_argument(
         "--overwrite",
