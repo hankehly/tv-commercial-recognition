@@ -1,4 +1,5 @@
 services:
+  # http://localhost:15672
   # https://hub.docker.com/_/rabbitmq
   rabbitmq:
     image: rabbitmq:3-management
@@ -39,6 +40,34 @@ services:
       timeout: 5s
       retries: 3
 
+  # celery:
+  #   image: celery:5.0.5
+  #   command: celery -A my_app worker -l info -Q celery -n celery@%h
+  #   environment:
+  #     CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+  #     CELERY_RESULT_BACKEND: redis://redis:6379/0
+  #     CELERY_TASK_SERIALIZER: json
+  #     CELERY_RESULT_SERIALIZER: json
+  #     CELERY_ACCEPT_CONTENT: json
+  #     CELERY_TIMEZONE: Europe/Moscow
+  #     CELERY_ENABLE_UTC: true
+  #     CELERYD_PREFETCH_MULTIPLIER: 1
+  #     CELERYD_MAX_TASKS_PER_CHILD: 1
+  #     CELERYD_TASK_TIME_LIMIT: 600
+  #     CELERYD_TASK_SOFT_TIME_LIMIT: 600
+  #     CELERYD_CONCURRENCY: 1
+  #     CELERYD_POOL: solo
+  #     CELERYD_HIJACK_ROOT_LOGGER: false
+  #     CELERYD_LOG_COLOR: false
+  #     CELERYD_LOG_FORMAT: "[%(asctime)s: %(levelname)s/%(processName)s] %(message)s"
+  #     CELERYD_TASK_LOG_FORMAT: "[%(asctime)s: %(levelname)s/%(processName)s] %(task_name)s[%(task_id)s]: %(message)s"
+  #   depends_on:
+  #     rabbitmq:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+
+  # http://localhost:5050
   # https://hub.docker.com/r/dpage/pgadmin4
   pgadmin:
     image: dpage/pgadmin4
@@ -51,20 +80,21 @@ services:
       - postgres
     volumes:
       - pgadmin:/var/lib/pgadmin
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget --tries 1 --spider http://0.0.0.0:5050 || exit"
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+    # healthcheck:
+    #   test:
+    #     [
+    #       "CMD-SHELL",
+    #       "wget --tries 1 --spider http://0.0.0.0:5050/login || exit"
+    #     ]
+    #   interval: 10s
+    #   timeout: 3s
+    #   retries: 3
 
+  # http://localhost:5555
   # https://hub.docker.com/r/mher/flower
   flower:
     image: mher/flower:2.0.1
-    command: celery flower -A my_app --address=0.0.0.0 --port=5555
+    command: celery flower -A tasks --address=0.0.0.0 --port=5555
     environment:
       FLOWER_ADDRESS: 0.0.0.0
       FLOWER_PORT: 5555
@@ -77,7 +107,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "wget --tries 1 --spider http://0.0.0.0:5555/flower/healthcheck || exit"
+          "wget --tries 1 --spider http://0.0.0.0:5555/healthcheck || exit"
         ]
       interval: 10s
       timeout: 3s
