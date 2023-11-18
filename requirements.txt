@@ -3,3 +3,5 @@ pydub==0.25.1
 celery[librabbitmq]==5.3.4
 # use hash instead of branch name so that updates work
 git+https://github.com/hankehly/dejavu.git@b248774
+isort
+black

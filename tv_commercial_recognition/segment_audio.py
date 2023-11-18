@@ -8,15 +8,10 @@ import json
 from pathlib import Path
 from subprocess import PIPE, Popen
 from typing import Any
-import sys
 
 from pydantic import BaseModel
 
-from tv_commercial_recognition.tasks import fingerprint_audio, export_segment
-
-
-def null_hook(export_path):
-    pass
+from tv_commercial_recognition.tasks import export_segment
 
 
 class AudioSegmenter(BaseModel):
@@ -33,9 +28,8 @@ class AudioSegmenter(BaseModel):
     min_segment_duration: float = 10
     max_segment_duration: float = 60
     detect_silence_noise: int = -100
-    detect_silence_duration: float = 0.8
+    detect_silence_duration: float = 0.75
     overwrite: bool = False
-    after_export_hook: Any = null_hook
     max_temp_file_size_bytes: int = 128 * 1024 * 1024  # 128 MB by default
 
     _log: logging.Logger = None
@@ -149,45 +143,47 @@ class AudioSegmenter(BaseModel):
                         line = p.stderr.read1().decode("utf-8")
                         match = re.search(silence_pattern, line)
                         if match:
-                            silence_end = float(match.group(1))
-                            silence_duration = float(match.group(2))
+                            silence_end_seconds = float(match.group(1))
+                            silence_duration_seconds = float(match.group(2))
                             self.log.info(
                                 json.dumps(
                                     {
                                         "message": "Silence detected",
-                                        "silence_end": silence_end,
-                                        "silence_duration": silence_duration,
+                                        "silence_end_seconds": silence_end_seconds,
+                                        "silence_duration_seconds": silence_duration_seconds,
                                     }
                                 )
                             )
                             segment_duration = (
-                                silence_end - silence_duration - next_segment_start
+                                silence_end_seconds
+                                - silence_duration_seconds
+                                - next_segment_start
                             )
                             if (
                                 self.min_segment_duration
                                 <= segment_duration
                                 <= self.max_segment_duration
                             ):
-                                # give ffmpeg a chance to write the audio file to disk
-                                # otherwise segment file size may be 0 bytes
                                 self.log.info(
                                     json.dumps(
                                         {
                                             "message": "Queuing segment export",
                                             "audio_file_path": tmp_audio_path,
                                             "segment_start": next_segment_start,
-                                            "silence_end": silence_end,
-                                            "silence_duration": silence_duration,
+                                            "silence_end_seconds": silence_end_seconds,
+                                            "silence_duration_seconds": silence_duration_seconds,
                                             "segments_path": str(self.segments_path),
                                             "detect_silence_noise": self.detect_silence_noise,
                                         }
                                     )
                                 )
+                                segment_end_seconds = (
+                                    silence_end_seconds - silence_duration_seconds
+                                )
                                 export_segment.delay(
-                                    next_segment_start,
                                     tmp_audio_path,
-                                    silence_end,
-                                    silence_duration,
+                                    next_segment_start,
+                                    segment_end_seconds,
                                     str(self.segments_path),
                                     self.detect_silence_noise,
                                 )
@@ -200,7 +196,7 @@ class AudioSegmenter(BaseModel):
                                         }
                                     )
                                 )
-                            next_segment_start = silence_end
+                            next_segment_start = silence_end_seconds
                             file_size = os.path.getsize(tmp_audio_path)
                             file_too_big = file_size > self.max_temp_file_size_bytes
                             if file_too_big:
@@ -242,10 +238,6 @@ class AudioSegmenter(BaseModel):
         self._shutdown = True
 
 
-def after_export_hook(export_path):
-    fingerprint_audio.delay(export_path)
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Segment audio based on silence detection."
@@ -276,8 +268,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--detect-silence-duration",
         type=float,
-        default=0.8,
-        help="Silencedetect duration threshold in seconds (default: 0.8)",
+        default=0.75,
+        help="Silencedetect duration threshold in seconds (default: 0.75)",
     )
     parser.add_argument(
         "--overwrite",
@@ -306,7 +298,6 @@ if __name__ == "__main__":
         min_segment_duration=args.min_segment,
         max_segment_duration=args.max_segment,
         overwrite=args.overwrite,
-        # after_export_hook=after_export_hook,
         max_temp_file_size_bytes=args.max_temp_file_size_bytes,
     )
     segmenter.configure_logging(args.log_level)
